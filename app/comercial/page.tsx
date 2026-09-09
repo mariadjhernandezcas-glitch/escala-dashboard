@@ -1,6 +1,13 @@
-import { getAdvisorsOverview, getDashboardMetrics, listAdvisors, type PeriodKey } from "@/lib/deals";
+import {
+  getAdvisorsOverview,
+  getDashboardMetrics,
+  getPeriodRange,
+  listAdvisors,
+  parseCustomRange,
+  type PeriodKey,
+} from "@/lib/deals";
 import { formatCurrency, formatDays, formatHours, formatPercent } from "@/lib/format";
-import { AdvisorSelect } from "@/components/comercial/AdvisorSelect";
+import { AdvisorTabs } from "@/components/comercial/AdvisorTabs";
 import { PeriodFilter } from "@/components/comercial/PeriodFilter";
 import { SyncButton } from "@/components/comercial/SyncButton";
 import { MetricCard } from "@/components/comercial/MetricCard";
@@ -39,17 +46,21 @@ const VALID_PERIODS: PeriodKey[] = ["all", "this_month", "last_month"];
 export default async function ComercialPage({
   searchParams,
 }: {
-  searchParams: { advisor?: string; period?: string };
+  searchParams: { advisor?: string; period?: string; from?: string; to?: string };
 }) {
   const period: PeriodKey = VALID_PERIODS.includes(searchParams.period as PeriodKey)
     ? (searchParams.period as PeriodKey)
     : "all";
+  const customRange = parseCustomRange(searchParams.from, searchParams.to);
+  const isCustom = customRange !== null;
+  const range = isCustom ? customRange : getPeriodRange(period);
 
   const advisors = await listAdvisors();
-  const advisorEmail =
-    searchParams.advisor || process.env.DEFAULT_ADVISOR_EMAIL || advisors[0]?.email;
+  const advisorEmail = searchParams.advisor || process.env.DEFAULT_ADVISOR_EMAIL || null;
 
-  if (!advisorEmail) {
+  const advisorsOverview = await getAdvisorsOverview(range);
+
+  if (advisors.length === 0) {
     return (
       <div className="card flex flex-col items-center gap-3 p-10 text-center">
         <span className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-brand-50 text-brand-600">
@@ -65,11 +76,6 @@ export default async function ComercialPage({
     );
   }
 
-  const [metrics, advisorsOverview] = await Promise.all([
-    getDashboardMetrics(advisorEmail, period),
-    getAdvisorsOverview(period),
-  ]);
-
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -78,21 +84,55 @@ export default async function ComercialPage({
           <p className="text-sm text-slate-500">Negocios asignados y tiempos de gestión por asesora</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <PeriodFilter selected={period} />
-          <AdvisorSelect advisors={advisors} selected={advisorEmail} />
+          <PeriodFilter selected={period} isCustom={isCustom} from={searchParams.from} to={searchParams.to} />
           <SyncButton />
         </div>
       </div>
 
-      <div className="card p-4">
-        <SectionHeader title="Resumen por asesora (todas)" badge={advisorsOverview.length} />
-        <AdvisorsOverviewTable advisors={advisorsOverview} selected={advisorEmail} period={period} />
-      </div>
+      <AdvisorTabs advisors={advisors} selected={advisorEmail} />
 
+      {!advisorEmail ? (
+        <div className="card p-4">
+          <SectionHeader title="Resumen por asesora" badge={advisorsOverview.length} />
+          <p className="mb-3 text-xs text-slate-400">
+            Abiertos por fecha de creación del negocio; ganados y perdidos por fecha en que se movieron a esa
+            etapa. Haz clic en una asesora para ver su detalle completo.
+          </p>
+          <AdvisorsOverviewTable
+            advisors={advisorsOverview}
+            selected=""
+            extraQuery={
+              isCustom
+                ? `from=${searchParams.from}&to=${searchParams.to}`
+                : period !== "all"
+                  ? `period=${period}`
+                  : ""
+            }
+          />
+        </div>
+      ) : (
+        <ComercialAdvisorDetail advisorEmail={advisorEmail} range={range} />
+      )}
+    </div>
+  );
+}
+
+async function ComercialAdvisorDetail({
+  advisorEmail,
+  range,
+}: {
+  advisorEmail: string;
+  range: { start: Date; end: Date } | null;
+}) {
+  const metrics = await getDashboardMetrics(advisorEmail, range);
+
+  return (
+    <div className="flex flex-col gap-6">
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
         <MetricCard
           label="Negocios asignados"
           value={String(metrics.totalDeals)}
+          hint="Creados en el período"
           icon={<IconBriefcase />}
           tone="slate"
         />
@@ -102,8 +142,20 @@ export default async function ComercialPage({
           icon={<IconCircleDot />}
           tone="brand"
         />
-        <MetricCard label="Ganados" value={String(metrics.wonDeals)} icon={<IconCheckCircle />} tone="success" />
-        <MetricCard label="Perdidos" value={String(metrics.lostDeals)} icon={<IconXCircle />} tone="danger" />
+        <MetricCard
+          label="Ganados"
+          value={String(metrics.wonDeals)}
+          hint="Por fecha en que se ganaron"
+          icon={<IconCheckCircle />}
+          tone="success"
+        />
+        <MetricCard
+          label="Perdidos"
+          value={String(metrics.lostDeals)}
+          hint="Por fecha en que se perdieron"
+          icon={<IconXCircle />}
+          tone="danger"
+        />
         <MetricCard
           label="Tasa de conversión"
           value={formatPercent(metrics.conversionRate)}

@@ -5,17 +5,17 @@ import { formatCurrency, formatDays, formatPercent } from "@/lib/format";
 export function AdvisorsOverviewTable({
   advisors,
   selected,
-  period,
+  extraQuery,
 }: {
   advisors: AdvisorSummary[];
   selected: string;
-  period: string;
+  extraQuery: string;
 }) {
   if (advisors.length === 0) {
     return <p className="text-sm text-slate-400">Sin negocios sincronizados todavía.</p>;
   }
 
-  const periodQuery = period !== "all" ? `&period=${period}` : "";
+  const periodQuery = extraQuery ? `&${extraQuery}` : "";
 
   return (
     <div className="overflow-x-auto">
