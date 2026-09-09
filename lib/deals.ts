@@ -5,6 +5,7 @@ import {
   fetchActivitiesSince,
   fetchAllPipelines,
   fetchContactById,
+  fetchContactsScrollSample,
   scrollDeals,
 } from "./escala";
 
@@ -122,6 +123,13 @@ async function syncDeals(): Promise<number> {
             console.log(
               "[escala-sync] full contact keys:",
               Object.keys(fullContact),
+              // "entity"/"message" no son datos de cliente — son metadata de
+              // respuesta de API (p. ej. un error estructurado), útil para
+              // saber si la ruta /contacts/{id} es válida.
+              "entity:",
+              JSON.stringify(fullContact.entity),
+              "message:",
+              JSON.stringify(fullContact.message),
               "utm-like keys:",
               Object.keys(fullContact).filter((k) => /utm|source|origen|fuente|canal/i.test(k))
             );
@@ -131,6 +139,25 @@ async function syncDeals(): Promise<number> {
               err instanceof Error ? err.message : String(err)
             );
           }
+        }
+
+        try {
+          const scrollRes = await fetchContactsScrollSample();
+          console.log(
+            "[escala-sync] contacts/scroll keys:",
+            Object.keys(scrollRes),
+            "first item keys:",
+            scrollRes.items?.[0] ? Object.keys(scrollRes.items[0]) : null,
+            "utm-like keys:",
+            scrollRes.items?.[0]
+              ? Object.keys(scrollRes.items[0]).filter((k) => /utm|source|origen|fuente|canal/i.test(k))
+              : null
+          );
+        } catch (err) {
+          console.log(
+            "[escala-sync] contacts/scroll failed:",
+            err instanceof Error ? err.message : String(err)
+          );
         }
       }
       const existing = (await sql`

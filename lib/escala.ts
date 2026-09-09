@@ -108,6 +108,12 @@ export async function fetchContactById(id: string): Promise<Record<string, unkno
   return escalaGet<Record<string, unknown>>(`/contacts/${id}`);
 }
 
+// Diagnóstico temporal: una sola página de /contacts/scroll para ver la
+// forma real de un contacto completo (la del negocio solo trae un resumen).
+export async function fetchContactsScrollSample(): Promise<{ items: Record<string, unknown>[] }> {
+  return escalaGet<{ items: Record<string, unknown>[] }>("/contacts/scroll", { size: 1 });
+}
+
 export async function fetchAllPipelines(): Promise<EscalaPipeline[]> {
   const pipelines: EscalaPipeline[] = [];
   let page = 0;
