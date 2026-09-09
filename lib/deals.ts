@@ -4,6 +4,7 @@ import {
   EscalaDeal,
   fetchActivitiesSince,
   fetchAllPipelines,
+  fetchContactById,
   scrollDeals,
 } from "./escala";
 
@@ -102,8 +103,35 @@ async function syncDeals(): Promise<number> {
                   (c: Record<string, unknown>) => c?.name ?? c?.label ?? c?.key ?? c?.fieldId ?? null
                 )
               )
-            : null
+            : null,
+          // Valores de campos operativos (no son datos personales de clientes,
+          // son estados/categorías del negocio) para saber qué valores esperar.
+          "cf_deal_hom_estado_de_la_cita_sobe_dropdown value:",
+          Array.isArray(custom)
+            ? undefined
+            : JSON.stringify((custom as Record<string, unknown> | undefined)?.["cf_deal_hom_estado_de_la_cita_sobe_dropdown"]),
+          "cf_deal_cohorte_twjj_dropdown value:",
+          Array.isArray(custom)
+            ? undefined
+            : JSON.stringify((custom as Record<string, unknown> | undefined)?.["cf_deal_cohorte_twjj_dropdown"])
         );
+
+        if (deal.contact?.id) {
+          try {
+            const fullContact = await fetchContactById(deal.contact.id);
+            console.log(
+              "[escala-sync] full contact keys:",
+              Object.keys(fullContact),
+              "utm-like keys:",
+              Object.keys(fullContact).filter((k) => /utm|source|origen|fuente|canal/i.test(k))
+            );
+          } catch (err) {
+            console.log(
+              "[escala-sync] fetchContactById failed:",
+              err instanceof Error ? err.message : String(err)
+            );
+          }
+        }
       }
       const existing = (await sql`
         SELECT stage_id FROM escala_deals WHERE id = ${deal.id}
@@ -397,7 +425,7 @@ export interface DateRange {
 // creó el negocio) — así "este mes" muestra lo que realmente se cerró ese
 // mes, sin importar cuándo se había abierto la oportunidad.
 export async function getDashboardMetrics(
-  advisorEmail: string,
+  advisorEmail: string | null,
   range: DateRange | null = null
 ): Promise<DashboardMetrics> {
   const sql = await getSqlReady();
@@ -410,7 +438,8 @@ export async function getDashboardMetrics(
       COUNT(*) FILTER (WHERE stage_type = 'open')::int AS open,
       COALESCE(SUM(value) FILTER (WHERE stage_type = 'open'), 0)::float AS "openValue"
     FROM escala_deals
-    WHERE assigned_to = ${advisorEmail}
+    WHERE assigned_to <> 'unassigned'
+      AND (${advisorEmail}::text IS NULL OR assigned_to = ${advisorEmail})
       AND (${start}::timestamptz IS NULL OR escala_created_at >= ${start})
       AND (${end}::timestamptz IS NULL OR escala_created_at < ${end})
   `) as { total: number; open: number; openValue: number }[];
@@ -427,7 +456,8 @@ export async function getDashboardMetrics(
       WHERE stage_type IN ('won', 'lost')
       ORDER BY deal_id, changed_at DESC
     ) e ON e.deal_id = d.id
-    WHERE d.assigned_to = ${advisorEmail} AND d.stage_type IN ('won', 'lost')
+    WHERE d.assigned_to <> 'unassigned' AND d.stage_type IN ('won', 'lost')
+      AND (${advisorEmail}::text IS NULL OR d.assigned_to = ${advisorEmail})
       AND (${start}::timestamptz IS NULL OR e.closed_at >= ${start})
       AND (${end}::timestamptz IS NULL OR e.closed_at < ${end})
   `) as { won: number; lost: number; lostValue: number }[];
@@ -446,7 +476,8 @@ export async function getDashboardMetrics(
   const stageCounts = (await sql`
     SELECT stage_id, COUNT(*)::int AS count, COALESCE(SUM(value), 0)::float AS value
     FROM escala_deals
-    WHERE assigned_to = ${advisorEmail} AND stage_type = 'open'
+    WHERE assigned_to <> 'unassigned' AND stage_type = 'open'
+      AND (${advisorEmail}::text IS NULL OR assigned_to = ${advisorEmail})
       AND (${start}::timestamptz IS NULL OR escala_created_at >= ${start})
       AND (${end}::timestamptz IS NULL OR escala_created_at < ${end})
     GROUP BY stage_id
@@ -470,7 +501,8 @@ export async function getDashboardMetrics(
       WHERE stage_type IN ('won', 'lost')
       ORDER BY deal_id, changed_at DESC
     ) e ON e.deal_id = d.id
-    WHERE d.assigned_to = ${advisorEmail} AND d.stage_type = 'lost'
+    WHERE d.assigned_to <> 'unassigned' AND d.stage_type = 'lost'
+      AND (${advisorEmail}::text IS NULL OR d.assigned_to = ${advisorEmail})
       AND (${start}::timestamptz IS NULL OR e.closed_at >= ${start})
       AND (${end}::timestamptz IS NULL OR e.closed_at < ${end})
     GROUP BY d.stage_id
@@ -495,7 +527,8 @@ export async function getDashboardMetrics(
       ORDER BY deal_id, changed_at ASC
     ) e
     JOIN escala_deals d ON d.id = e.deal_id
-    WHERE d.assigned_to = ${advisorEmail} AND d.escala_created_at IS NOT NULL
+    WHERE d.assigned_to <> 'unassigned' AND d.escala_created_at IS NOT NULL
+      AND (${advisorEmail}::text IS NULL OR d.assigned_to = ${advisorEmail})
       AND (${start}::timestamptz IS NULL OR d.escala_created_at >= ${start})
       AND (${end}::timestamptz IS NULL OR d.escala_created_at < ${end})
   `) as { avg_hours: number | null }[];
@@ -509,7 +542,8 @@ export async function getDashboardMetrics(
       ORDER BY deal_id, changed_at DESC
     ) e
     JOIN escala_deals d ON d.id = e.deal_id
-    WHERE d.assigned_to = ${advisorEmail} AND d.escala_created_at IS NOT NULL
+    WHERE d.assigned_to <> 'unassigned' AND d.escala_created_at IS NOT NULL
+      AND (${advisorEmail}::text IS NULL OR d.assigned_to = ${advisorEmail})
       AND (${start}::timestamptz IS NULL OR e.changed_at >= ${start})
       AND (${end}::timestamptz IS NULL OR e.changed_at < ${end})
   `) as { avg_days: number | null }[];
@@ -527,7 +561,8 @@ export async function getDashboardMetrics(
         LEAD(e.changed_at) OVER (PARTITION BY e.deal_id ORDER BY e.changed_at) AS next_changed_at
       FROM escala_deal_stage_events e
       JOIN escala_deals d ON d.id = e.deal_id
-      WHERE d.assigned_to = ${advisorEmail}
+      WHERE d.assigned_to <> 'unassigned'
+        AND (${advisorEmail}::text IS NULL OR d.assigned_to = ${advisorEmail})
         AND (${start}::timestamptz IS NULL OR d.escala_created_at >= ${start})
         AND (${end}::timestamptz IS NULL OR d.escala_created_at < ${end})
     )
@@ -559,7 +594,8 @@ export async function getDashboardMetrics(
       )::int AS days_since_activity
     FROM escala_deals d
     LEFT JOIN escala_activities a ON a.deal_id = d.id
-    WHERE d.assigned_to = ${advisorEmail}
+    WHERE d.assigned_to <> 'unassigned'
+      AND (${advisorEmail}::text IS NULL OR d.assigned_to = ${advisorEmail})
       AND (${start}::timestamptz IS NULL OR d.escala_created_at >= ${start})
       AND (${end}::timestamptz IS NULL OR d.escala_created_at < ${end})
     GROUP BY d.id
@@ -577,7 +613,8 @@ export async function getDashboardMetrics(
       )::int AS days_since_activity
     FROM escala_deals d
     LEFT JOIN escala_activities a ON a.deal_id = d.id
-    WHERE d.assigned_to = ${advisorEmail} AND d.stage_type = 'open'
+    WHERE d.assigned_to <> 'unassigned' AND d.stage_type = 'open'
+      AND (${advisorEmail}::text IS NULL OR d.assigned_to = ${advisorEmail})
       AND (${start}::timestamptz IS NULL OR d.escala_created_at >= ${start})
       AND (${end}::timestamptz IS NULL OR d.escala_created_at < ${end})
     GROUP BY d.id
@@ -603,7 +640,8 @@ export async function getDashboardMetrics(
       WHERE stage_type IN ('won', 'lost')
       ORDER BY deal_id, changed_at DESC
     ) e ON e.deal_id = d.id
-    WHERE d.assigned_to = ${advisorEmail} AND d.stage_type = 'lost'
+    WHERE d.assigned_to <> 'unassigned' AND d.stage_type = 'lost'
+      AND (${advisorEmail}::text IS NULL OR d.assigned_to = ${advisorEmail})
       AND (${start}::timestamptz IS NULL OR e.closed_at >= ${start})
       AND (${end}::timestamptz IS NULL OR e.closed_at < ${end})
     GROUP BY d.id

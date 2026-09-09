@@ -91,6 +91,10 @@ export default async function ComercialPage({
 
       <AdvisorTabs advisors={advisors} selected={advisorEmail} />
 
+      {!advisorEmail && (
+        <ComercialAdvisorDetail advisorEmail={null} range={range} title="Gestión general (todas las asesoras)" />
+      )}
+
       {!advisorEmail ? (
         <div className="card p-4">
           <SectionHeader title="Resumen por asesora" badge={advisorsOverview.length} />
@@ -111,7 +115,7 @@ export default async function ComercialPage({
           />
         </div>
       ) : (
-        <ComercialAdvisorDetail advisorEmail={advisorEmail} range={range} />
+        <ComercialAdvisorDetail advisorEmail={advisorEmail} range={range} title={advisorEmail} />
       )}
     </div>
   );
@@ -120,14 +124,17 @@ export default async function ComercialPage({
 async function ComercialAdvisorDetail({
   advisorEmail,
   range,
+  title,
 }: {
-  advisorEmail: string;
+  advisorEmail: string | null;
   range: { start: Date; end: Date } | null;
+  title: string;
 }) {
   const metrics = await getDashboardMetrics(advisorEmail, range);
 
   return (
     <div className="flex flex-col gap-6">
+      <h2 className="text-sm font-semibold text-slate-500">{title}</h2>
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
         <MetricCard
           label="Negocios asignados"

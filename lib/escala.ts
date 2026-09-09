@@ -101,6 +101,13 @@ function nextScrollId<T>(res: ScrollResponse<T>): string | undefined {
   return res.scrollId || res.nextScrollId;
 }
 
+// Diagnóstico temporal: la referencia de contacto embebida en el negocio
+// (EscalaDealContact) no trae fuente/UTM. Esto confirma si el contacto
+// completo sí lo tiene.
+export async function fetchContactById(id: string): Promise<Record<string, unknown>> {
+  return escalaGet<Record<string, unknown>>(`/contacts/${id}`);
+}
+
 export async function fetchAllPipelines(): Promise<EscalaPipeline[]> {
   const pipelines: EscalaPipeline[] = [];
   let page = 0;
