@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { syncEscala } from "@/lib/deals";
 
+export const maxDuration = 60;
+
 function isAuthorized(req: NextRequest): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return true;

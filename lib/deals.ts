@@ -4,8 +4,6 @@ import {
   EscalaDeal,
   fetchActivitiesSince,
   fetchAllPipelines,
-  fetchContactById,
-  fetchContactsScrollSample,
   scrollDeals,
 } from "./escala";
 
@@ -50,120 +48,30 @@ async function syncPipelines(): Promise<number> {
   return pipelines.length;
 }
 
+// Siempre trae el historial completo de negocios (sin filtro de fecha): el
+// endpoint incremental de Escala (/deals/scroll?since=...) demostró ser poco
+// confiable (500 intermitentes) y, más importante, es la única forma de
+// garantizar que el dashboard no se desincronice silenciosamente de Escala.
+// Para que una cuenta con miles de negocios no exceda el tiempo límite de la
+// función serverless, cada página de 200 negocios se escribe en lote (una
+// consulta para ver qué ya existía + un solo INSERT múltiple) en vez de
+// fila por fila.
 async function syncDeals(): Promise<number> {
   const sql = await getSqlReady();
-  const since = await getSyncCursor("deals_since");
-  let maxModified = since;
   let count = 0;
 
   const onPage = async (deals: EscalaDeal[]) => {
-    for (const deal of deals) {
-      count += 1;
-      if (count === 1) {
-        // Diagnóstico temporal: la forma real de la respuesta de Escala no
-        // siempre coincide con la spec publicada. Solo se registran nombres
-        // de campos y tipos, nunca valores (evita filtrar datos de clientes
-        // a los logs).
-        const dealAny = deal as unknown as Record<string, unknown>;
-        const custom = dealAny.custom;
-        console.log(
-          "[escala-sync] deal keys:",
-          Object.keys(deal),
-          "pipeline keys:",
-          deal.pipeline ? Object.keys(deal.pipeline) : null,
-          "contact keys:",
-          deal.contact ? Object.keys(deal.contact) : null,
-          "funnelId:",
-          JSON.stringify(dealAny.funnelId),
-          "priority:",
-          JSON.stringify(dealAny.priority),
-          "productId:",
-          JSON.stringify(dealAny.productId),
-          "products:",
-          Array.isArray(dealAny.products)
-            ? `array(${(dealAny.products as unknown[]).length}) firstKeys=${JSON.stringify(
-                Object.keys((dealAny.products as Record<string, unknown>[])[0] ?? {})
-              )}`
-            : typeof dealAny.products,
-          "custom type:",
-          Array.isArray(custom) ? `array(${custom.length})` : typeof custom,
-          "custom sample:",
-          Array.isArray(custom)
-            ? JSON.stringify(
-                custom.map((c: Record<string, unknown>) =>
-                  c && typeof c === "object" ? Object.keys(c) : typeof c
-                )
-              )
-            : custom && typeof custom === "object"
-              ? JSON.stringify(Object.keys(custom as Record<string, unknown>))
-              : null,
-          "custom field names:",
-          Array.isArray(custom)
-            ? JSON.stringify(
-                custom.map(
-                  (c: Record<string, unknown>) => c?.name ?? c?.label ?? c?.key ?? c?.fieldId ?? null
-                )
-              )
-            : null,
-          // Valores de campos operativos (no son datos personales de clientes,
-          // son estados/categorías del negocio) para saber qué valores esperar.
-          "cf_deal_hom_estado_de_la_cita_sobe_dropdown value:",
-          Array.isArray(custom)
-            ? undefined
-            : JSON.stringify((custom as Record<string, unknown> | undefined)?.["cf_deal_hom_estado_de_la_cita_sobe_dropdown"]),
-          "cf_deal_cohorte_twjj_dropdown value:",
-          Array.isArray(custom)
-            ? undefined
-            : JSON.stringify((custom as Record<string, unknown> | undefined)?.["cf_deal_cohorte_twjj_dropdown"])
-        );
+    if (deals.length === 0) return;
+    count += deals.length;
 
-        if (deal.contact?.id) {
-          try {
-            const fullContact = await fetchContactById(deal.contact.id);
-            console.log(
-              "[escala-sync] full contact keys:",
-              Object.keys(fullContact),
-              // "entity"/"message" no son datos de cliente — son metadata de
-              // respuesta de API (p. ej. un error estructurado), útil para
-              // saber si la ruta /contacts/{id} es válida.
-              "entity:",
-              JSON.stringify(fullContact.entity),
-              "message:",
-              JSON.stringify(fullContact.message),
-              "utm-like keys:",
-              Object.keys(fullContact).filter((k) => /utm|source|origen|fuente|canal/i.test(k))
-            );
-          } catch (err) {
-            console.log(
-              "[escala-sync] fetchContactById failed:",
-              err instanceof Error ? err.message : String(err)
-            );
-          }
-        }
+    const ids = deals.map((d) => d.id);
+    const existingRows = (await sql`
+      SELECT id, stage_id FROM escala_deals WHERE id = ANY(${ids})
+    `) as { id: string; stage_id: string | null }[];
+    const existingStageById = new Map(existingRows.map((r) => [r.id, r.stage_id]));
+    const existingIds = new Set(existingRows.map((r) => r.id));
 
-        try {
-          const scrollRes = await fetchContactsScrollSample();
-          console.log(
-            "[escala-sync] contacts/scroll keys:",
-            Object.keys(scrollRes),
-            "first item keys:",
-            scrollRes.items?.[0] ? Object.keys(scrollRes.items[0]) : null,
-            "utm-like keys:",
-            scrollRes.items?.[0]
-              ? Object.keys(scrollRes.items[0]).filter((k) => /utm|source|origen|fuente|canal/i.test(k))
-              : null
-          );
-        } catch (err) {
-          console.log(
-            "[escala-sync] contacts/scroll failed:",
-            err instanceof Error ? err.message : String(err)
-          );
-        }
-      }
-      const existing = (await sql`
-        SELECT stage_id FROM escala_deals WHERE id = ${deal.id}
-      `) as { stage_id: string | null }[];
-
+    const rows = deals.map((deal) => {
       const contactName = [deal.contact?.firstName, deal.contact?.lastName]
         .filter(Boolean)
         .join(" ")
@@ -171,74 +79,80 @@ async function syncDeals(): Promise<number> {
       const createdAt = toDate(deal.created);
       const modifiedAt = toDate(deal.modified);
       const newStageId = deal.pipeline?.stageId ?? null;
+      return {
+        id: deal.id,
+        name: deal.name,
+        assigned_to: deal.assignedTo || "unassigned",
+        contact_id: deal.contact?.id ?? null,
+        contact_name: contactName || null,
+        contact_email: deal.contact?.email ?? null,
+        contact_phone: deal.contact?.phone ?? null,
+        pipeline_id: deal.pipeline?.id ?? null,
+        pipeline_name: deal.pipeline?.name ?? null,
+        stage_id: newStageId,
+        stage_type: deal.pipeline?.stageType ?? null,
+        value: deal.value ?? null,
+        escala_created_at: createdAt ? createdAt.toISOString() : null,
+        escala_modified_at: modifiedAt ? modifiedAt.toISOString() : null,
+      };
+    });
 
+    await sql`
+      INSERT INTO escala_deals (
+        id, name, assigned_to, contact_id, contact_name, contact_email, contact_phone,
+        pipeline_id, pipeline_name, stage_id, stage_type, value,
+        escala_created_at, escala_modified_at, synced_at
+      )
+      SELECT
+        id, name, assigned_to, contact_id, contact_name, contact_email, contact_phone,
+        pipeline_id, pipeline_name, stage_id, stage_type, value,
+        escala_created_at::timestamptz, escala_modified_at::timestamptz, now()
+      FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS t(
+        id text, name text, assigned_to text, contact_id text, contact_name text,
+        contact_email text, contact_phone text, pipeline_id text, pipeline_name text,
+        stage_id text, stage_type text, value numeric,
+        escala_created_at text, escala_modified_at text
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        assigned_to = EXCLUDED.assigned_to,
+        contact_id = EXCLUDED.contact_id,
+        contact_name = EXCLUDED.contact_name,
+        contact_email = EXCLUDED.contact_email,
+        contact_phone = EXCLUDED.contact_phone,
+        pipeline_id = EXCLUDED.pipeline_id,
+        pipeline_name = EXCLUDED.pipeline_name,
+        stage_id = EXCLUDED.stage_id,
+        stage_type = EXCLUDED.stage_type,
+        value = EXCLUDED.value,
+        escala_created_at = EXCLUDED.escala_created_at,
+        escala_modified_at = EXCLUDED.escala_modified_at,
+        synced_at = now()
+    `;
+
+    // Solo registra un evento para un cambio de etapa que sí observamos entre
+    // dos sincronizaciones. Un negocio visto por primera vez no tiene etapa
+    // previa conocida (puede llevar tiempo existiendo en Escala desde antes
+    // de que empezáramos a sincronizar), así que inventar un evento "inicial"
+    // aquí falsearía el historial y distorsionaría los tiempos de gestión.
+    for (const deal of deals) {
+      const newStageId = deal.pipeline?.stageId ?? null;
+      if (!existingIds.has(deal.id) || !newStageId) continue;
+      const previousStageId = existingStageById.get(deal.id) ?? null;
+      if (previousStageId === newStageId) continue;
+      const createdAt = toDate(deal.created);
+      const modifiedAt = toDate(deal.modified);
       await sql`
-        INSERT INTO escala_deals (
-          id, name, assigned_to, contact_id, contact_name, contact_email, contact_phone,
-          pipeline_id, pipeline_name, stage_id, stage_type, value,
-          escala_created_at, escala_modified_at, synced_at
-        ) VALUES (
-          ${deal.id}, ${deal.name}, ${deal.assignedTo || "unassigned"},
-          ${deal.contact?.id ?? null}, ${contactName || null}, ${deal.contact?.email ?? null},
-          ${deal.contact?.phone ?? null}, ${deal.pipeline?.id ?? null}, ${deal.pipeline?.name ?? null},
-          ${newStageId}, ${deal.pipeline?.stageType ?? null}, ${deal.value ?? null},
-          ${createdAt}, ${modifiedAt}, now()
+        INSERT INTO escala_deal_stage_events (deal_id, from_stage_id, to_stage_id, stage_type, changed_at)
+        VALUES (
+          ${deal.id}, ${previousStageId}, ${newStageId},
+          ${deal.pipeline?.stageType ?? null}, ${modifiedAt ?? createdAt ?? new Date()}
         )
-        ON CONFLICT (id) DO UPDATE SET
-          name = EXCLUDED.name,
-          assigned_to = EXCLUDED.assigned_to,
-          contact_id = EXCLUDED.contact_id,
-          contact_name = EXCLUDED.contact_name,
-          contact_email = EXCLUDED.contact_email,
-          contact_phone = EXCLUDED.contact_phone,
-          pipeline_id = EXCLUDED.pipeline_id,
-          pipeline_name = EXCLUDED.pipeline_name,
-          stage_id = EXCLUDED.stage_id,
-          stage_type = EXCLUDED.stage_type,
-          value = EXCLUDED.value,
-          escala_created_at = EXCLUDED.escala_created_at,
-          escala_modified_at = EXCLUDED.escala_modified_at,
-          synced_at = now()
       `;
-
-      const previousStageId = existing[0]?.stage_id ?? null;
-      const isNewDeal = existing.length === 0;
-      // Only log an event for a change we actually observed between two syncs.
-      // A deal seen for the first time has no known prior stage (it may have
-      // existed in Escala for a long time before we started tracking it), so
-      // recording a synthetic "first" event here would fabricate history and
-      // skew the time-to-first-move / time-to-close averages below.
-      if (!isNewDeal && newStageId && previousStageId !== newStageId) {
-        await sql`
-          INSERT INTO escala_deal_stage_events (deal_id, from_stage_id, to_stage_id, stage_type, changed_at)
-          VALUES (
-            ${deal.id}, ${previousStageId}, ${newStageId},
-            ${deal.pipeline?.stageType ?? null}, ${modifiedAt ?? createdAt ?? new Date()}
-          )
-        `;
-      }
-
-      if (!maxModified || (deal.modified && deal.modified > maxModified)) {
-        maxModified = deal.modified;
-      }
     }
   };
 
-  try {
-    await scrollDeals(since, onPage);
-  } catch (error) {
-    // La búsqueda incremental de Escala (filtro de fecha) puede fallar con
-    // un error interno de su lado aunque la cuenta esté bien configurada.
-    // Si ya teníamos un cursor guardado, reintentamos una vez con una
-    // sincronización completa (sin filtro de fecha), que es la que
-    // funciona de forma confiable.
-    if (!since) throw error;
-    count = 0;
-    maxModified = since;
-    await scrollDeals(undefined, onPage);
-  }
-
-  if (maxModified) await setSyncCursor("deals_since", maxModified);
+  await scrollDeals(undefined, onPage);
   return count;
 }
 
