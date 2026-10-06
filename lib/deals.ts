@@ -150,6 +150,28 @@ async function syncDeals(): Promise<number> {
         )
       `;
     }
+
+    // Respaldo para negocios ganados/perdidos que nunca tuvieron un evento de
+    // etapa registrado: la regla de arriba (no fabricar un evento "inicial"
+    // al ver un negocio por primera vez) deja sin fecha de cierre a todo lo
+    // que ya estaba ganado/perdido antes de que empezáramos a sincronizar, o
+    // a lo que entró a la cuenta durante una sincronización incremental
+    // anterior. Como la sincronización ahora siempre trae el historial
+    // completo, cada negocio ganado/perdido pasa por aquí tarde o temprano,
+    // así que esto rellena el hueco usando la fecha de modificación de
+    // Escala (la mejor aproximación disponible a la fecha real de cierre) sin
+    // duplicar el evento ya insertado arriba cuando sí hubo un cambio real.
+    await sql`
+      INSERT INTO escala_deal_stage_events (deal_id, from_stage_id, to_stage_id, stage_type, changed_at)
+      SELECT d.id, NULL, d.stage_id, d.stage_type, COALESCE(d.escala_modified_at, d.escala_created_at, now())
+      FROM escala_deals d
+      WHERE d.id = ANY(${ids})
+        AND d.stage_type IN ('won', 'lost')
+        AND NOT EXISTS (
+          SELECT 1 FROM escala_deal_stage_events e
+          WHERE e.deal_id = d.id AND e.to_stage_id = d.stage_id
+        )
+    `;
   };
 
   await scrollDeals(undefined, onPage);
